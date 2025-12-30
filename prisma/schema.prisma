@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                          Int      @id @default(autoincrement())
+  nickname                    String?
+  telegramId                  BigInt   @unique
+  binanceApiKey               String?
+  binanceApiSecret            String?
+  paradexAccountAddress       String?
+  paradexPrivateKey           String?
+  lighterL1Address            String?
+  lighterPrivateKey           String?
+  lighterApiKeyIndex          Int?
+  lighterAccountIndex         Int?
+  extendedApiKey              String?
+  extendedStarkPublicKey      String?
+  extendedStarkPrivateKey     String?
+  extendedVaultId             Int?
+  hlPrivateKey                String?
+  hlWalletAddress             String?
+  hlAccountEth                String?
+  binanceApiKeyTest           String?
+  binanceApiSecretTest        String?
+  paradexTestAccountAddress   String?
+  paradexTestPrivateKey       String?
+  hlTestPrivateKey            String?
+  hlTestWalletAddress         String?
+  hlTestAccountEth            String?
+  extendedTestApiKey          String?
+  extendedTestStarkPublicKey  String?
+  extendedTestStarkPrivateKey String?
+  extendedTestVaultId         Int?
+  lighterTestL1Address        String?
+  lighterTestPrivateKey       String?
+  lighterTestApiKeyIndex      Int?
+  lighterTestAccountIndex     Int?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime
+}
+
+model BinanceCoin {
+  coin     String @id
+  interval Int
+
+  @@map("binance_coins")
+}
+
+model HyperliquidCoin {
+  coin String @id
+
+  @@map("hyperliquid_coins")
+}
+
+model LighterCoin {
+  coin     String @id
+  marketId Int
+
+  @@map("lighter_coins")
+}
+
+model ParadexCoin {
+  coin String @id
+
+  @@map("paradex_coins")
+}
+
+model ExtendedCoin {
+  coin String @id
+
+  @@map("extended_coins")
+}
+
+model BinanceFunding {
+  id           Int    @id @default(autoincrement())
+  coin         String // Здесь теперь будут лежать чистые имена (PEPE, BONK)
+  fundingRate  String
+  date         BigInt
+
+  @@unique([coin, date])
+  @@map("binance_fundings")
+}
+
+model HyperliquidFunding {
+  id           Int    @id @default(autoincrement())
+  coin         String // Чистые имена (ETH, PEPE)
+  fundingRate  String
+  date         BigInt
+
+  @@unique([coin, date])
+  @@map("hyperliquid_fundings")
+}
+model ParadexFunding {
+  id           Int    @id @default(autoincrement())
+  coin         String
+  fundingRate  String
+  date         BigInt
+
+  @@unique([coin, date])
+  @@map("paradex_fundings")
+}
+model LighterFunding {
+  id           Int    @id @default(autoincrement())
+  coin         String
+  fundingRate  String
+  date         BigInt
+
+  @@unique([coin, date])
+  @@map("lighter_fundings")
+}
+
+model ExtendedFunding {
+  id           Int    @id @default(autoincrement())
+  coin         String
+  fundingRate  String
+  date         BigInt
+
+  @@unique([coin, date])
+  @@map("extended_fundings")
+}
