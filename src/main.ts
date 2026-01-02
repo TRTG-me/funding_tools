@@ -37,7 +37,7 @@ bot.use(async (ctx, next) => {
 
 // 4. Клавиатура
 const mainKeyboard = Markup.keyboard([
-    ['📊 Фандинг монеты', '💎 Top 20 Fun'],
+    ['📊 Фандинг монеты', '💎 Top 20 монет'],
     ['💎 Обновить список монет', '🚀 Обновить Базу Данных'],
 ]).resize();
 
@@ -51,6 +51,9 @@ bot.hears('🚀 Обновить Базу Данных', (ctx) => {
 });
 
 bot.hears('💎 Обновить список монет', (ctx) => {
+    if (addCoinsService.isSyncing) {
+        return ctx.reply('⚠️ Синхронизация торговых пар уже запущена другим пользователем. Пожалуйста, подождите.');
+    }
     ctx.reply('⏳ Начинаю синхронизацию торговых пар...');
     runCoinSync(ctx).catch(err => console.error(err));
 });
@@ -59,7 +62,7 @@ bot.hears('📊 Фандинг монеты', (ctx) => {
     calcFundingsController.startFlow(ctx).catch(err => console.error(err));
 });
 
-bot.hears('💎 Top 20 Fun', (ctx) => {
+bot.hears('💎 Top 20 монет', (ctx) => {
     calcFundingsController.showBestOpportunities(ctx).catch(err => console.error(err));
 });
 
@@ -103,6 +106,9 @@ async function runCoinSync(ctx?: any) {
         console.log(`✅ [AutoSync] Обновлено: ${result.totalMatched} пар.`);
     } catch (error: any) {
         console.log('❌ [AutoSync] Critical Error:', error.message);
+        if (ctx) {
+            await ctx.reply(`❌ Ошибка синхронизации: ${error.message}`);
+        }
     }
 }
 

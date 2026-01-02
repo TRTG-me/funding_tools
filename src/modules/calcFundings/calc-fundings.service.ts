@@ -136,62 +136,75 @@ export class CalcFundingsService {
         return coins.map(c => this.normalizeCoin(c.coin, exchange.toLowerCase()));
     }
 
-    async findBestOpportunities() {
-        const MIN_THRESHOLDS = { h8: 40, d1: 40, d3: 25, d7: 25, d14: 20 };
-        const exchanges = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
+    async findBestOpportunities(selected?: string[]) {
+        const MIN_THRESHOLDS = { h8: 40, d1: 30, d3: 30, d7: 25, d14: 20 };
+        const fullList = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
         const results: any[] = [];
 
+        // Логика выбора пар
+        let pairsToCompare: [string, string][] = [];
+        const active = (selected && selected.length > 0) ? selected : fullList;
+
+        if (active.length === 1) {
+            const target = active[0];
+            fullList.filter(e => e !== target).forEach(other => {
+                pairsToCompare.push([target, other]);
+            });
+        } else {
+            for (let i = 0; i < active.length; i++) {
+                for (let j = i + 1; j < active.length; j++) {
+                    pairsToCompare.push([active[i], active[j]]);
+                }
+            }
+        }
+
         const coinLists = new Map<string, string[]>();
-        for (const ex of exchanges) {
+        const uniqueExchanges = Array.from(new Set(pairsToCompare.flat()));
+
+        for (const ex of uniqueExchanges) {
             coinLists.set(ex, await this.getExchangeCoinList(ex));
         }
 
-        for (let i = 0; i < exchanges.length; i++) {
-            for (let j = i + 1; j < exchanges.length; j++) {
-                const ex1 = exchanges[i];
-                const ex2 = exchanges[j];
+        const checkThresholds = (values: number[]) => {
+            return values.every((v, idx) => {
+                const threshold = Object.values(MIN_THRESHOLDS)[idx];
+                return v >= threshold;
+            });
+        };
 
-                const list1 = coinLists.get(ex1)!;
-                const list2 = coinLists.get(ex2)!;
-                const common = list1.filter(c => list2.includes(c));
+        for (const [exName1, exName2] of pairsToCompare) {
+            const list1 = coinLists.get(exName1)!;
+            const list2 = coinLists.get(exName2)!;
+            const common = list1.filter(c => list2.includes(c));
 
-                await Promise.all(common.map(async (coin) => {
-                    const diffs = await this.getComparison(coin, ex1, ex2);
+            await Promise.all(common.map(async (coin) => {
+                const diffs = await this.getComparison(coin, exName1, exName2);
 
-                    // Если есть NaN (листинг был недавно) - пропускаем монету
-                    if (diffs.some(d => isNaN(d.apr1) || isNaN(d.apr2))) return;
+                // Если есть NaN (листинг был недавно) - пропускаем монету
+                if (diffs.some(d => isNaN(d.apr1) || isNaN(d.apr2))) return;
 
-                    const allPositive = diffs.every((d: any, idx: number) => {
-                        const threshold = Object.values(MIN_THRESHOLDS)[idx];
-                        return d.diff >= threshold;
+                const diffsArr = diffs.map(d => d.diff);
+                const reversedDiffs = diffsArr.map(v => -v);
+
+                // Случай 1: ex1 > ex2 (Short ex1, Long ex2) -> Направление ex2-ex1
+                if (checkThresholds(diffsArr)) {
+                    results.push({
+                        coin,
+                        pair: `${exName2[0]}-${exName1[0]}`,
+                        diffs: diffsArr,
+                        sortVal: diffsArr[2]
                     });
-
-                    const allNegative = diffs.every((d: any, idx: number) => {
-                        const threshold = Object.values(MIN_THRESHOLDS)[idx];
-                        return d.diff <= -threshold;
+                }
+                // Случай 2: ex2 > ex1 (Long ex1, Short ex2) -> Направление ex1-ex2
+                else if (checkThresholds(reversedDiffs)) {
+                    results.push({
+                        coin,
+                        pair: `${exName1[0]}-${exName2[0]}`,
+                        diffs: reversedDiffs,
+                        sortVal: reversedDiffs[2]
                     });
-
-                    if (allPositive) {
-                        // ex1 > ex2. Значит Short на ex1, Long на ex2.
-                        // Юзер просит формат Long-Short: ex2-ex1
-                        results.push({
-                            coin,
-                            pair: `${ex2[0]}-${ex1[0]}`,
-                            diffs: diffs.map((d: any) => d.diff),
-                            sortVal: diffs[2].diff
-                        });
-                    } else if (allNegative) {
-                        // ex1 < ex2. Значит Long на ex1, Short на ex2.
-                        // Юзер просит формат Long-Short: ex1-ex2
-                        results.push({
-                            coin,
-                            pair: `${ex1[0]}-${ex2[0]}`,
-                            diffs: diffs.map((d: any) => Math.abs(d.diff)),
-                            sortVal: Math.abs(diffs[2].diff)
-                        });
-                    }
-                }));
-            }
+                }
+            }));
         }
 
         // Сортировка по sortVal (теперь это 3 дня) и топ 20
