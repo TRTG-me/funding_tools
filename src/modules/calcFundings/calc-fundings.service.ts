@@ -1,6 +1,153 @@
 import { prisma } from '../database/prisma.service';
+import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
+import { ChartConfiguration } from 'chart.js';
+
+// Пороги фильтрации для сканера "Лучшие монеты" (APR %)
+const SCAN_MIN_THRESHOLDS = { h8: 30, d1: 20, d3: 20, d7: 15, d14: 10 };
 
 export class CalcFundingsService {
+    private chartJSNodeCanvas: ChartJSNodeCanvas;
+
+    constructor() {
+        this.chartJSNodeCanvas = new ChartJSNodeCanvas({
+            width: 1000,
+            height: 500,
+            backgroundColour: 'white'
+        });
+    }
+
+    async getHourlyHistory(exchange: string, coin: string, startTs: number, endTs: number): Promise<{ date: number, rate: number }[]> {
+        const query = {
+            where: { coin, date: { gte: BigInt(startTs), lte: BigInt(endTs) } },
+            orderBy: { date: 'asc' as const }
+        };
+
+        let records: any[] = [];
+        if (exchange === 'Binance') records = await prisma.binanceFunding.findMany(query);
+        else if (exchange === 'Hyperliquid') records = await prisma.hyperliquidFunding.findMany(query);
+        else if (exchange === 'Paradex') records = await prisma.paradexFunding.findMany(query);
+        else if (exchange === 'Lighter') records = await prisma.lighterFunding.findMany(query);
+        else if (exchange === 'Extended') records = await prisma.extendedFunding.findMany(query);
+
+        if (records.length === 0) return [];
+
+        // Определяем множитель для APR.
+        // Стандарт: rate * (записей в году) * 100
+        let multiplier = 24 * 365 * 100; // По умолчанию 1-часовой фандинг
+
+        if (exchange === 'Binance') {
+            // Для бинанса проверяем частоту (8ч, 4ч или 1ч)
+            if (records.length >= 2) {
+                const diff = Math.abs(Number(records[records.length - 1].date) - Number(records[records.length - 2].date));
+                const hours = Math.round(diff / 3600000);
+                const freq = hours > 0 ? hours : 8; // Если 0 (ошибка данных), берем 8ч
+                multiplier = (24 / freq) * 365 * 100;
+            } else {
+                multiplier = 3 * 365 * 100; // 8-часовой по умолчанию
+            }
+        }
+
+        // Группируем по часам (убираем микро-смещения)
+        const seen = new Set<number>();
+        const result: { date: number, rate: number }[] = [];
+
+        for (const r of records) {
+            const hTs = Math.floor(Number(r.date) / 3600000) * 3600000;
+            if (!seen.has(hTs)) {
+                seen.add(hTs);
+                result.push({
+                    date: hTs,
+                    rate: parseFloat(r.fundingRate) * multiplier
+                });
+            }
+        }
+        return result;
+    }
+
+    async generateMultiChart(coin: string, datasetsInfo: { label: string, history: any[] }[]): Promise<Buffer> {
+        const colorMap: Record<string, string> = {
+            'Binance': 'rgb(33, 150, 243)',     // Blue
+            'Hyperliquid': 'rgb(244, 67, 54)', // Red
+            'Paradex': 'rgb(76, 175, 80)',     // Green
+            'Lighter': 'rgb(156, 39, 176)',     // Purple
+            'Extended': 'rgb(255, 152, 0)'      // Orange
+        };
+
+        // Собираем все точки времени
+        const allTimes = Array.from(new Set(datasetsInfo.flatMap(d => d.history.map(h => h.date)))).sort((a, b) => a - b);
+
+        if (allTimes.length === 0) {
+            // Если данных нет, создаем "пустой" график с надписью
+            return await this.chartJSNodeCanvas.renderToBuffer({
+                type: 'line',
+                data: { labels: ['No Data'], datasets: [] },
+                options: { plugins: { title: { display: true, text: `No historical data for ${coin}` } } }
+            });
+        }
+
+        const labels = allTimes.map(t => {
+            const d = new Date(t);
+            return `${d.getDate()}.${d.getMonth() + 1} ${d.getHours()}:00`;
+        });
+
+        const chartDatasets = datasetsInfo.map(ds => {
+            const historyMap = new Map(ds.history.map(h => [h.date, h.rate]));
+            return {
+                label: ds.label,
+                data: allTimes.map(t => {
+                    const val = historyMap.get(t);
+                    return val !== undefined ? parseFloat(val.toFixed(1)) : null;
+                }),
+                borderColor: colorMap[ds.label] || '#000',
+                backgroundColor: (colorMap[ds.label] || '#000').replace('rgb', 'rgba').replace(')', ', 0.1)'),
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.4,
+                spanGaps: true
+            };
+        });
+
+        const configuration: ChartConfiguration = {
+            type: 'line',
+            data: {
+                labels,
+                datasets: chartDatasets as any[]
+            },
+            options: {
+                responsive: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: `${coin} Funding APR % (14 days)`,
+                        font: { size: 20 }
+                    },
+                    legend: { position: 'bottom' }
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            maxTicksLimit: 14,
+                            callback: function (val, index) {
+                                const label = this.getLabelForValue(index as number);
+                                return label.split(' ')[0];
+                            }
+                        }
+                    },
+                    y: {
+                        grid: {
+
+                        },
+                        ticks: {
+                            callback: (value) => value + '%'
+                        }
+                    }
+                }
+            }
+        };
+
+        return await this.chartJSNodeCanvas.renderToBuffer(configuration);
+    }
+
     private normalizeCoin(name: string, exchange: string): string {
         let base = name.toUpperCase();
 
@@ -137,11 +284,10 @@ export class CalcFundingsService {
     }
 
     async findBestOpportunities(selected?: string[]) {
-        const MIN_THRESHOLDS = { h8: 40, d1: 30, d3: 30, d7: 25, d14: 20 };
         const fullList = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
         const results: any[] = [];
 
-        // Логика выбора пар
+        // 1. Определение пар для сравнения
         let pairsToCompare: [string, string][] = [];
         const active = (selected && selected.length > 0) ? selected : fullList;
 
@@ -158,56 +304,131 @@ export class CalcFundingsService {
             }
         }
 
-        const coinLists = new Map<string, string[]>();
         const uniqueExchanges = Array.from(new Set(pairsToCompare.flat()));
-
+        const coinLists = new Map<string, string[]>();
         for (const ex of uniqueExchanges) {
             coinLists.set(ex, await this.getExchangeCoinList(ex));
         }
 
+        // Собираем все монеты, которые участвуют хотя бы в одной паре
+        const allCommonCoins = new Set<string>();
+        for (const [ex1, ex2] of pairsToCompare) {
+            const l1 = coinLists.get(ex1)!;
+            const l2 = coinLists.get(ex2)!;
+            l1.filter(c => l2.includes(c)).forEach(c => allCommonCoins.add(c));
+        }
+
+        if (allCommonCoins.size === 0) return [];
+
+        // 2. БАЛК-ЗАГРУЗКА ДАННЫХ
+        // Берем с запасом 15 дней для корректных gap-checks
+        const nowMs = Date.now();
+        const startTs = BigInt(nowMs - 15 * 24 * 60 * 60 * 1000);
+
+        const fundingCache = new Map<string, Map<string, any[]>>(); // ex -> coin -> records[]
+
+        await Promise.all(uniqueExchanges.map(async (ex) => {
+            const coinMap = new Map<string, any[]>();
+            fundingCache.set(ex, coinMap);
+
+            let allRecords: any[] = [];
+            const query = { where: { coin: { in: Array.from(allCommonCoins) }, date: { gte: startTs } } };
+
+            if (ex === 'Binance') allRecords = await prisma.binanceFunding.findMany(query);
+            else if (ex === 'Hyperliquid') allRecords = await prisma.hyperliquidFunding.findMany(query);
+            else if (ex === 'Paradex') allRecords = await prisma.paradexFunding.findMany(query);
+            else if (ex === 'Lighter') allRecords = await prisma.lighterFunding.findMany(query);
+            else if (ex === 'Extended') allRecords = await prisma.extendedFunding.findMany(query);
+
+            for (const r of allRecords) {
+                if (!coinMap.has(r.coin)) coinMap.set(r.coin, []);
+                coinMap.get(r.coin)!.push(r);
+            }
+        }));
+
+        // 3. Расчет APR в памяти
+        const referenceEndTime = this.getStandardReferenceTime();
+        const periods = [
+            { label: '8h', totalHours: 8 },
+            { label: '1d', totalHours: 24 },
+            { label: '3d', totalHours: 72 },
+            { label: '7d', totalHours: 168 },
+            { label: '14d', totalHours: 336 },
+        ];
+
+        const calculateAPRInMemory = (ex: string, coin: string, startTs: number, endTs: number, periodHours: number): number => {
+            const records = fundingCache.get(ex)?.get(coin) || [];
+            const filtered = records.filter(r => {
+                const d = Number(r.date);
+                return d >= startTs && d <= endTs;
+            });
+
+            if (filtered.length === 0) return NaN;
+
+            // Gap Check
+            const firstRecordTs = Math.min(...filtered.map(r => Number(r.date)));
+            const gapMs = firstRecordTs - startTs;
+            const thresholdMs = (ex === 'Binance' ? 481 : 61) * 60 * 1000;
+            if (gapMs > thresholdMs) return NaN;
+
+            const sum = filtered.reduce((acc, r) => acc + parseFloat(r.fundingRate), 0);
+            const avg = (ex === 'Binance') ? (sum / periodHours) : (sum / filtered.length);
+            return avg * 24 * 365 * 100;
+        };
+
         const checkThresholds = (values: number[]) => {
             return values.every((v, idx) => {
-                const threshold = Object.values(MIN_THRESHOLDS)[idx];
+                const threshold = Object.values(SCAN_MIN_THRESHOLDS)[idx];
                 return v >= threshold;
             });
         };
 
-        for (const [exName1, exName2] of pairsToCompare) {
-            const list1 = coinLists.get(exName1)!;
-            const list2 = coinLists.get(exName2)!;
-            const common = list1.filter(c => list2.includes(c));
+        // 4. Сравнение
+        for (const [ex1, ex2] of pairsToCompare) {
+            const l1 = coinLists.get(ex1)!;
+            const l2 = coinLists.get(ex2)!;
+            const common = l1.filter(c => l2.includes(c));
 
-            await Promise.all(common.map(async (coin) => {
-                const diffs = await this.getComparison(coin, exName1, exName2);
+            for (const coin of common) {
+                const diffsArr: number[] = [];
+                let hasNaN = false;
 
-                // Если есть NaN (листинг был недавно) - пропускаем монету
-                if (diffs.some(d => isNaN(d.apr1) || isNaN(d.apr2))) return;
+                for (const p of periods) {
+                    const pEndTs = referenceEndTime; // Упрощаем для скана: используем общее время
+                    const pStartTs = pEndTs - (p.totalHours * 60 * 60 * 1000 - 30 * 60 * 1000);
 
-                const diffsArr = diffs.map(d => d.diff);
+                    const apr1 = calculateAPRInMemory(ex1, coin, pStartTs, pEndTs, p.totalHours);
+                    const apr2 = calculateAPRInMemory(ex2, coin, pStartTs, pEndTs, p.totalHours);
+
+                    if (isNaN(apr1) || isNaN(apr2)) {
+                        hasNaN = true;
+                        break;
+                    }
+                    diffsArr.push(apr1 - apr2);
+                }
+
+                if (hasNaN) continue;
+
                 const reversedDiffs = diffsArr.map(v => -v);
 
-                // Случай 1: ex1 > ex2 (Short ex1, Long ex2) -> Направление ex2-ex1
                 if (checkThresholds(diffsArr)) {
                     results.push({
                         coin,
-                        pair: `${exName2[0]}-${exName1[0]}`,
+                        pair: `${ex2[0]}-${ex1[0]}`,
                         diffs: diffsArr,
                         sortVal: diffsArr[2]
                     });
-                }
-                // Случай 2: ex2 > ex1 (Long ex1, Short ex2) -> Направление ex1-ex2
-                else if (checkThresholds(reversedDiffs)) {
+                } else if (checkThresholds(reversedDiffs)) {
                     results.push({
                         coin,
-                        pair: `${exName1[0]}-${exName2[0]}`,
+                        pair: `${ex1[0]}-${ex2[0]}`,
                         diffs: reversedDiffs,
                         sortVal: reversedDiffs[2]
                     });
                 }
-            }));
+            }
         }
 
-        // Сортировка по sortVal (теперь это 3 дня) и топ 20
-        return results.sort((a, b) => b.sortVal - a.sortVal).slice(0, 20);
+        return results.sort((a, b) => b.sortVal - a.sortVal).slice(0, 30);
     }
 }
