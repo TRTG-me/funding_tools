@@ -1,26 +1,95 @@
 import { Context, Markup } from 'telegraf';
 import { CalcFundingsService } from './calc-fundings.service';
 
-const userStates = new Map<number, { coin: string, selected: string[] }>();
-const scanStates = new Map<number, { selected: string[] }>();
+// TTL-based Map для автоматической очистки состояний через 10 минут
+interface TimestampedState<T> {
+    data: T;
+    timestamp: number;
+}
+
+const userStates = new Map<number, TimestampedState<{ coin: string, selected: string[] }>>();
+const scanStates = new Map<number, TimestampedState<{ selected: string[] }>>();
+
+const STATE_TTL_MS = 10 * 60 * 1000; // 10 минут
+
+// Очистка старых состояний каждые 5 минут
+setInterval(() => {
+    const now = Date.now();
+
+    for (const [userId, state] of userStates.entries()) {
+        if (now - state.timestamp > STATE_TTL_MS) {
+            userStates.delete(userId);
+            console.log(`🧹 Cleaned expired userState for user ${userId}`);
+        }
+    }
+
+    for (const [userId, state] of scanStates.entries()) {
+        if (now - state.timestamp > STATE_TTL_MS) {
+            scanStates.delete(userId);
+            console.log(`🧹 Cleaned expired scanState for user ${userId}`);
+        }
+    }
+}, 5 * 60 * 1000); // Каждые 5 минут
+
+// Helper функции для работы с TTL-состояниями
+function setUserState(userId: number, data: { coin: string, selected: string[] }) {
+    userStates.set(userId, { data, timestamp: Date.now() });
+}
+
+function getUserState(userId: number): { coin: string, selected: string[] } | undefined {
+    const entry = userStates.get(userId);
+    if (!entry) return undefined;
+
+    // Проверяем, не истек ли TTL
+    if (Date.now() - entry.timestamp > STATE_TTL_MS) {
+        userStates.delete(userId);
+        return undefined;
+    }
+
+    // Обновляем timestamp при доступе
+    entry.timestamp = Date.now();
+    return entry.data;
+}
+
+function setScanState(userId: number, data: { selected: string[] }) {
+    scanStates.set(userId, { data, timestamp: Date.now() });
+}
+
+function getScanState(userId: number): { selected: string[] } | undefined {
+    const entry = scanStates.get(userId);
+    if (!entry) return undefined;
+
+    if (Date.now() - entry.timestamp > STATE_TTL_MS) {
+        scanStates.delete(userId);
+        return undefined;
+    }
+
+    entry.timestamp = Date.now();
+    return entry.data;
+}
 
 export class CalcFundingsController {
     private service = new CalcFundingsService();
 
     async startFlow(ctx: Context) {
         await ctx.reply('🔍 Введите название монеты (например, BTC, ETH или PEPE):');
-        userStates.set(ctx.from!.id, { coin: '', selected: [] });
+        setUserState(ctx.from!.id, { coin: '', selected: [] });
     }
 
     async handleText(ctx: Context): Promise<boolean> {
         if (!ctx.from || !ctx.message || !('text' in ctx.message)) return false;
 
         const userId = ctx.from.id;
-        const state = userStates.get(userId);
+        const state = getUserState(userId);
 
         if (!state || state.coin !== '') return false;
 
         const coin = ctx.message.text.trim().toUpperCase();
+        if (coin.length > 20) {
+            await ctx.reply('⚠️ Название монеты слишком длинное (макс. 20 символов).');
+            return true;
+        }
+
         const exchanges = await this.service.getExchangesForCoin(coin);
 
         if (exchanges.length === 0) {
@@ -73,7 +142,7 @@ export class CalcFundingsController {
             const c0 = 12; // COIN/PAIR
             const cW = 5;  // DATA
 
-            let table = '```\n';
+            let table = '```text\n';
             table += `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
             table += `│${'COIN (P)'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│\n`;
             table += `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
@@ -95,6 +164,7 @@ export class CalcFundingsController {
             console.error('Best Opportunities Error:', error);
             await ctx.reply('❌ Произошла ошибка при сканировании.');
         } finally {
+            // Гарантированно освобождаем блокировку, даже если произошла ошибка
             this.isScanning = false;
         }
     }
@@ -118,18 +188,20 @@ export class CalcFundingsController {
     }
 
     private getCoinExchangesKeyboard(coin: string, exchanges: string[], selected: string[]) {
-        const buttons = exchanges.map(ex => {
-            const isSel = selected.includes(ex);
-            return Markup.button.callback(isSel ? `✅ ${ex}` : ex, `coin_sel_${ex}`);
+        // Оставляем только те кнопки, которые еще НЕ выбраны
+        const available = exchanges.filter(ex => !selected.includes(ex));
+
+        const buttons = available.map(ex => {
+            return Markup.button.callback(ex, `coin_sel_${ex}`);
         });
 
         const rows: any[][] = [];
-        // Разбиваем биржи на строки по 5 штук
         for (let i = 0; i < buttons.length; i += 5) {
             rows.push(buttons.slice(i, i + 5));
         }
+
         // Кнопка ОК всегда отдельной строкой снизу
-        rows.push([Markup.button.callback('🚀 Показать фандинг', 'coin_ok')]);
+        rows.push([Markup.button.callback('✅ ОК', 'coin_ok')]);
 
         return Markup.inlineKeyboard(rows);
     }
@@ -151,7 +223,7 @@ export class CalcFundingsController {
         const name2 = ex2.substring(0, c0).padEnd(c0);
 
         let table = `💎 *${coin}*: ${ex1} 🆚 ${ex2}\n\n`;
-        table += '```\n';
+        table += '```text\n';
         const line = `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
         const top = `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
         const bottom = `└${'─'.repeat(c0)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┘\n`;
@@ -187,14 +259,14 @@ export class CalcFundingsController {
         }
 
         if (data === 'scan_manual') {
-            scanStates.set(userId, { selected: [] });
+            setScanState(userId, { selected: [] });
             await ctx.editMessageText('Выберите биржи (от 1 до 5) и нажмите ОК:', this.getScanKeyboard([]));
             return await ctx.answerCbQuery();
         }
 
         if (data.startsWith('scan_toggle_')) {
             const ex = data.replace('scan_toggle_', '');
-            const stateScan = scanStates.get(userId);
+            const stateScan = getScanState(userId);
             if (!stateScan) return await ctx.answerCbQuery();
 
             if (!stateScan.selected.includes(ex)) {
@@ -213,7 +285,7 @@ export class CalcFundingsController {
         }
 
         if (data === 'scan_confirm') {
-            const stateScan = scanStates.get(userId);
+            const stateScan = getScanState(userId);
             if (!stateScan || stateScan.selected.length === 0) {
                 return ctx.answerCbQuery('⚠️ Выберите хотя бы одну биржу!');
             }
@@ -224,48 +296,93 @@ export class CalcFundingsController {
         }
 
         // --- Обработка одиночного расчета монеты ---
-        const state = userStates.get(userId);
+        const state = getUserState(userId);
         if (!state) return await ctx.answerCbQuery();
 
         if (data.startsWith('coin_sel_')) {
             const ex = data.replace('coin_sel_', '');
-            const state = userStates.get(userId);
+            const state = getUserState(userId);
             if (!state) return await ctx.answerCbQuery();
 
-            // Пользователь может выбрать только одну (радио-кнопка)
-            state.selected = [ex];
+            // Добавляем выбор (мультиселект)
+            if (!state.selected.includes(ex)) {
+                state.selected.push(ex);
+            }
 
             const allExchanges = await this.service.getExchangesForCoin(state.coin);
-            await ctx.editMessageText(`Выбрана биржа: *${ex}*\nНажмите кнопку ниже для расчета относительно всех остальных бирж:`, {
+            const list = state.selected.join(', ');
+
+            await ctx.editMessageText(`Выбрано: *${list}*\nВыберите еще биржи или нажмите ОК:`, {
                 parse_mode: 'Markdown',
                 ...this.getCoinExchangesKeyboard(state.coin, allExchanges, state.selected)
             });
             return await ctx.answerCbQuery();
 
         } else if (data === 'coin_ok') {
-            const state = userStates.get(userId);
+            const state = getUserState(userId);
             if (!state || state.selected.length === 0) {
-                return ctx.answerCbQuery('⚠️ Выберите биржу!');
+                return ctx.answerCbQuery('⚠️ Выберите хотя бы одну биржу!');
             }
 
-            const baseEx = state.selected[0];
             const allExchanges = await this.service.getExchangesForCoin(state.coin);
-            const others = allExchanges.filter(ex => ex !== baseEx);
+            let pairs: [string, string][] = [];
 
-            if (others.length === 0) {
-                await ctx.reply(`Монета ${state.coin} торгуется только на ${baseEx}. Сравнивать не с чем.`);
+            if (state.selected.length === 1) {
+                // Если выбрана 1 биржа - она против всех остальных
+                const baseEx = state.selected[0];
+                const others = allExchanges.filter(ex => ex !== baseEx);
+                others.forEach(other => pairs.push([baseEx, other]));
+            } else {
+                // Если выбрано 2 и более - сравнение только внутри этого списка (все со всеми)
+                for (let i = 0; i < state.selected.length; i++) {
+                    for (let j = i + 1; j < state.selected.length; j++) {
+                        pairs.push([state.selected[i], state.selected[j]]);
+                    }
+                }
+            }
+
+            if (pairs.length === 0) {
+                await ctx.reply(`Монета ${state.coin} торгуется только на ${state.selected[0]}. Сравнивать не с чем.`);
                 userStates.delete(userId);
                 return await ctx.answerCbQuery();
             }
 
-            await ctx.editMessageText(`⏳ Генерирую отчеты для *${state.coin}* (${baseEx} vs All)...`, { parse_mode: 'Markdown' });
+            await ctx.editMessageText(`⏳ Формирую отчеты и общий график...`, { parse_mode: 'Markdown' });
 
-            for (const other of others) {
+            const now = Date.now();
+            const startTs = now - 14 * 24 * 60 * 60 * 1000;
+
+            const allPossible = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
+            const targetExchanges = state.selected.length === 1 ? allPossible : state.selected;
+
+            // Собираем истории для всех бирж, которые пойдут на ОДИН график
+            const historyData: { label: string, history: any[] }[] = [];
+            for (const ex of targetExchanges) {
+                const h = await this.service.getHourlyHistory(ex, state.coin, startTs, now);
+                if (h.length > 0) {
+                    historyData.push({ label: ex, history: h });
+                }
+            }
+
+            // Выводим таблицы по парам (как раньше)
+            for (const [e1, e2] of pairs) {
                 try {
-                    const table = await this.renderComparisonTable(state.coin, baseEx, other);
+                    const table = await this.renderComparisonTable(state.coin, e1, e2);
                     await ctx.reply(table, { parse_mode: 'Markdown' });
+                    // Микро-пауза чтобы не ловить 429 от Telegram
+                    await new Promise(resolve => setTimeout(resolve, 200));
                 } catch (err) {
-                    console.error(`Error rendering table ${baseEx}-${other}:`, err);
+                    console.error(`Error rendering table ${e1}-${e2}:`, err);
+                }
+            }
+
+            // В конце выводим ОДИН общий график
+            if (historyData.length > 0) {
+                try {
+                    const buffer = await this.service.generateMultiChart(state.coin, historyData);
+                    await ctx.replyWithPhoto({ source: buffer });
+                } catch (err) {
+                    console.error(`Error generating multi-chart:`, err);
                 }
             }
 

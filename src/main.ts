@@ -12,11 +12,15 @@ import { CalcFundingsController } from './modules/calcFundings/calc-fundings.con
 
 // 2. Инициализация
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
-    handlerTimeout: 36_000_000 // 10 часов
+    handlerTimeout: 120_000 // 2 минуты (достаточно для любой операции)
 });
 const masterController = new MasterController();
 const addCoinsService = new AddCoinsService();
 const calcFundingsController = new CalcFundingsController();
+
+// Простейший Rate Limite (1 запрос в 10 сек для сканера)
+const lastScanTime = new Map<number, number>();
+const SCAN_COOLDOWN = 10_000;
 
 // 3. Авторизация (Middleware)
 // ... (уже есть)
@@ -32,12 +36,16 @@ bot.use(async (ctx, next) => {
         }
     } catch (error: any) {
         console.error('Middleware Authorization Error:', error.message);
+        // Безопасный ответ при сбое БД - НЕ пропускаем неавторизованных
+        if (ctx.message && 'text' in ctx.message) {
+            return ctx.reply('⚠️ Система временно недоступна. База данных переподключается, попробуйте через 10 секунд.');
+        }
     }
 });
 
 // 4. Клавиатура
 const mainKeyboard = Markup.keyboard([
-    ['📊 Фандинг монеты', '💎 Top 20 монет'],
+    ['📊 Фандинг монеты', '💎 Лучшие монеты'],
     ['💎 Обновить список монет', '🚀 Обновить Базу Данных'],
 ]).resize();
 
@@ -46,24 +54,54 @@ bot.start((ctx) => {
     ctx.reply('👋 Система готова к работе.', mainKeyboard);
 });
 
-bot.hears('🚀 Обновить Базу Данных', (ctx) => {
-    masterController.handleFullSync(ctx).catch(err => console.error(err));
+bot.hears('🚀 Обновить Базу Данных', async (ctx) => {
+    try {
+        await masterController.handleFullSync(ctx);
+    } catch (err: any) {
+        console.error('Full Sync Error:', err);
+        await ctx.reply('❌ Ошибка обновления базы данных. Попробуйте позже.');
+    }
 });
 
-bot.hears('💎 Обновить список монет', (ctx) => {
+bot.hears('💎 Обновить список монет', async (ctx) => {
     if (addCoinsService.isSyncing) {
         return ctx.reply('⚠️ Синхронизация торговых пар уже запущена другим пользователем. Пожалуйста, подождите.');
     }
-    ctx.reply('⏳ Начинаю синхронизацию торговых пар...');
-    runCoinSync(ctx).catch(err => console.error(err));
+    try {
+        await ctx.reply('⏳ Начинаю синхронизацию торговых пар...');
+        await runCoinSync(ctx);
+    } catch (err: any) {
+        console.error('Coin Sync Error:', err);
+        await ctx.reply('❌ Ошибка синхронизации монет. Попробуйте позже.');
+    }
 });
 
-bot.hears('📊 Фандинг монеты', (ctx) => {
-    calcFundingsController.startFlow(ctx).catch(err => console.error(err));
+bot.hears('📊 Фандинг монеты', async (ctx) => {
+    try {
+        await calcFundingsController.startFlow(ctx);
+    } catch (err: any) {
+        console.error('Funding Flow Error:', err);
+        await ctx.reply('❌ Ошибка запуска анализа фандинга. Попробуйте позже.');
+    }
 });
 
-bot.hears('💎 Top 20 монет', (ctx) => {
-    calcFundingsController.showBestOpportunities(ctx).catch(err => console.error(err));
+bot.hears('💎 Лучшие монеты', async (ctx) => {
+    const userId = ctx.from!.id;
+    const now = Date.now();
+    const last = lastScanTime.get(userId) || 0;
+
+    if (now - last < SCAN_COOLDOWN) {
+        const remaining = Math.ceil((SCAN_COOLDOWN - (now - last)) / 1000);
+        return await ctx.reply(`⚠️ Пожалуйста, подождите ${remaining} сек. перед следующим сканированием.`);
+    }
+
+    try {
+        await calcFundingsController.showBestOpportunities(ctx);
+        lastScanTime.set(userId, now);
+    } catch (err: any) {
+        console.error('Top 20 Error:', err);
+        await ctx.reply('❌ Ошибка сканирования топ монет. Попробуйте позже.');
+    }
 });
 
 // Общий обработчик текста для ввода названия монеты
