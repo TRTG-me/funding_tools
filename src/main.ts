@@ -4,6 +4,8 @@ import { prisma } from './modules/database/prisma.service';
 import { MasterController } from './modules/collector/master.controller';
 import { AddCoinsService } from './modules/addCoinsDB/add-coins.service';
 import { CalcFundingsController } from './modules/calcFundings/calc-fundings.controller';
+import express from 'express';
+import apiRouter from './modules/apiReference/api-reference.controller';
 
 // 1. Фикс для BigInt
 (BigInt.prototype as any).toJSON = function () {
@@ -12,7 +14,7 @@ import { CalcFundingsController } from './modules/calcFundings/calc-fundings.con
 
 // 2. Инициализация
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
-    handlerTimeout: 120_000 // 2 минуты (достаточно для любой операции)
+    handlerTimeout: 900_000 // 10 минут (нужно для полной синхронизации БД)
 });
 const masterController = new MasterController();
 const addCoinsService = new AddCoinsService();
@@ -118,7 +120,17 @@ bot.on('callback_query', (ctx) => {
     calcFundingsController.handleCallback(ctx).catch(err => console.error('Callback Error:', err));
 });
 
-// 6. Запуск
+// 6. API Server (Express)
+const app = express();
+app.use(express.json());
+app.use('/api', apiRouter);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`📡 API Server is running on port ${PORT}`);
+});
+
+// 7. Запуск бота
 bot.launch()
     .then(() => console.log('🚀 Бот запущен (Full Sync)'))
     .catch((err) => console.error('💥 Launch Error:', err.message));

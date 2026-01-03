@@ -59,74 +59,101 @@ export class ParadexService {
         const defaultStartTime = endAt - 14 * 24 * 60 * 60 * 1000;
 
         const latestRecords = await prisma.paradexFunding.groupBy({ by: ['coin'], _max: { date: true } });
+        const isDbEmpty = latestRecords.length === 0;
         const lastRecordMap = new Map(latestRecords.map((r: any) => [r.coin, Number(r._max.date)]));
 
         let totalSaved = 0;
         const startTimeProcessing = Date.now();
 
-        const syncResults = await Promise.all(coins.map(async (coinEntry) => {
-            let coinsSaved = 0;
-            try {
-                const baseSymbol = this.normalizeSymbol(coinEntry.coin);
-                const fundingPeriod = marketMap.get(coinEntry.coin) || 8;
-                const lastDate = lastRecordMap.get(baseSymbol);
-                const fetchStartTime = lastDate || defaultStartTime;
+        // Всегда 2 пачки если БД пуста (например 50 и 51 для 101 монеты), иначе одна полная пачка
+        const chunks: any[][] = [];
+        if (isDbEmpty && coins.length > 1) {
+            const mid = Math.floor(coins.length / 2);
+            chunks.push(coins.slice(0, mid));
+            chunks.push(coins.slice(mid));
+        } else {
+            chunks.push(coins);
+        }
 
-                if (fetchStartTime >= endAt) return 0;
-                await new Promise(r => setTimeout(r, Math.random() * 5003));
+        const syncResults: number[] = [];
 
-                const hourlyGroups = new Map<number, { sum: number, count: number }>();
-                let currentCursor: string | null = null;
-                let pageNum = 0;
-                let keepGoing = true;
+        for (let idx = 0; idx < chunks.length; idx++) {
+            const chunk = chunks[idx];
+            console.log(`[Paradex] Загружаем пачку ${idx + 1}/${chunks.length} (${chunk.length} монет)...`);
 
-                while (keepGoing) {
-                    const fData = await this.fetchFundingPage(coinEntry.coin, endAt, currentCursor);
-                    pageNum++;
+            const chunkResults = await Promise.all(chunk.map(async (coinEntry) => {
+                let coinsSaved = 0;
+                try {
+                    const baseSymbol = this.normalizeSymbol(coinEntry.coin);
+                    const fundingPeriod = marketMap.get(coinEntry.coin) || 8;
+                    const lastDate = lastRecordMap.get(baseSymbol);
+                    const fetchStartTime = lastDate || defaultStartTime;
 
-                    if (fData.results && fData.results.length > 0) {
-                        for (const item of fData.results) {
-                            if (item.created_at < fetchStartTime) { keepGoing = false; break; }
+                    if (fetchStartTime >= endAt) return 0;
+                    await new Promise(r => setTimeout(r, Math.random() * 5003));
 
-                            const d = new Date(item.created_at - 1);
-                            d.setMinutes(0, 0, 0);
-                            d.setMilliseconds(0);
-                            d.setHours(d.getHours() + 1);
-                            const hStamp = d.getTime();
+                    const hourlyGroups = new Map<number, { sum: number, count: number }>();
+                    let currentCursor: string | null = null;
+                    let pageNum = 0;
+                    let keepGoing = true;
 
-                            if (!hourlyGroups.has(hStamp)) hourlyGroups.set(hStamp, { sum: 0, count: 0 });
-                            const g = hourlyGroups.get(hStamp)!;
-                            g.sum += parseFloat(item.funding_rate);
-                            g.count += 1;
+                    while (keepGoing) {
+                        const fData = await this.fetchFundingPage(coinEntry.coin, endAt, currentCursor);
+                        pageNum++;
+
+                        if (fData.results && fData.results.length > 0) {
+                            for (const item of fData.results) {
+                                if (item.created_at < fetchStartTime) { keepGoing = false; break; }
+
+                                const d = new Date(item.created_at - 1);
+                                d.setMinutes(0, 0, 0);
+                                d.setMilliseconds(0);
+                                d.setHours(d.getHours() + 1);
+                                const hStamp = d.getTime();
+
+                                if (!hourlyGroups.has(hStamp)) hourlyGroups.set(hStamp, { sum: 0, count: 0 });
+                                const g = hourlyGroups.get(hStamp)!;
+                                g.sum += parseFloat(item.funding_rate);
+                                g.count += 1;
+                            }
+                        } else {
+                            keepGoing = false;
                         }
-                    } else {
-                        keepGoing = false;
+
+                        currentCursor = fData.next;
+                        if (!currentCursor) keepGoing = false;
+                        if (keepGoing) await new Promise(r => setTimeout(r, pageNum % 13 === 0 ? 60002 : 302));
                     }
 
-                    currentCursor = fData.next;
-                    if (!currentCursor) keepGoing = false;
-                    if (keepGoing) await new Promise(r => setTimeout(r, pageNum % 13 === 0 ? 60002 : 302));
-                }
+                    const recordsToSave = [];
+                    for (const [hStamp, stats] of hourlyGroups.entries()) {
+                        if (hStamp <= (lastDate || 0) || hStamp > endAt) continue;
+                        recordsToSave.push({
+                            coin: baseSymbol,
+                            fundingRate: (stats.sum / stats.count / fundingPeriod).toFixed(12),
+                            date: BigInt(hStamp)
+                        });
+                    }
 
-                const recordsToSave = [];
-                for (const [hStamp, stats] of hourlyGroups.entries()) {
-                    if (hStamp <= (lastDate || 0) || hStamp > endAt) continue;
-                    recordsToSave.push({
-                        coin: baseSymbol,
-                        fundingRate: (stats.sum / stats.count / fundingPeriod).toFixed(12),
-                        date: BigInt(hStamp)
-                    });
+                    if (recordsToSave.length > 0) {
+                        await prisma.paradexFunding.createMany({ data: recordsToSave, skipDuplicates: true });
+                        coinsSaved = recordsToSave.length;
+                    }
+                } catch (error: any) {
+                    const serverMsg = error.response?.data ? JSON.stringify(error.response.data) : '';
+                    console.error(`[Paradex] Error for ${coinEntry.coin}: ${error.message} ${serverMsg}`);
                 }
+                return coinsSaved;
+            }));
 
-                if (recordsToSave.length > 0) {
-                    await prisma.paradexFunding.createMany({ data: recordsToSave, skipDuplicates: true });
-                    coinsSaved = recordsToSave.length;
-                }
-            } catch (error: any) {
-                console.error(`[Paradex] Error for ${coinEntry.coin}: ${error.message}`);
+            syncResults.push(...chunkResults);
+
+            // Пауза только если есть следующая пачка
+            if (idx < chunks.length - 1) {
+                console.log(`[Paradex] Пауза 10с перед следующей пачкой...`);
+                await new Promise(r => setTimeout(r, 10000));
             }
-            return coinsSaved;
-        }));
+        }
 
         totalSaved = syncResults.reduce((acc, val) => acc + val, 0);
 

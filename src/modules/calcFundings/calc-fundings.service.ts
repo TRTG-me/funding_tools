@@ -3,7 +3,7 @@ import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
 import { ChartConfiguration } from 'chart.js';
 
 // Пороги фильтрации для сканера "Лучшие монеты" (APR %)
-const SCAN_MIN_THRESHOLDS = { h8: 30, d1: 20, d3: 20, d7: 15, d14: 10 };
+const SCAN_MIN_THRESHOLDS = { h8: 30, d1: 30, d3: 25, d7: 25, d14: 20 };
 
 export class CalcFundingsService {
     private chartJSNodeCanvas: ChartJSNodeCanvas;
@@ -430,5 +430,31 @@ export class CalcFundingsService {
         }
 
         return results.sort((a, b) => b.sortVal - a.sortVal).slice(0, 30);
+    }
+
+    async getAllCoins(): Promise<string[]> {
+        const [bin, hl, light, paradex, ext] = await Promise.all([
+            prisma.binanceCoin.findMany({ select: { coin: true } }),
+            prisma.hyperliquidCoin.findMany({ select: { coin: true } }),
+            prisma.lighterCoin.findMany({ select: { coin: true } }),
+            prisma.paradexCoin.findMany({ select: { coin: true } }),
+            prisma.extendedCoin.findMany({ select: { coin: true } }),
+        ]);
+
+        const all = new Set([
+            ...bin.map(c => c.coin.replace('USDT', '').replace(/^1000/, '').split('-')[0]),
+            ...hl.map(c => c.coin.replace(/^1000/, '')),
+            ...light.map(c => c.coin.replace(/^1000/, '')),
+            ...paradex.map(c => c.coin.split('-')[0].replace(/^1000/, '')),
+            ...ext.map(c => c.coin.replace('-USD', '').replace(/^1000/, '')),
+        ]);
+
+        const cleaned = new Set<string>();
+        all.forEach(s => {
+            let clean = s.replace(/^k(?=[A-Z])/, '');
+            cleaned.add(clean);
+        });
+
+        return Array.from(cleaned).sort();
     }
 }
