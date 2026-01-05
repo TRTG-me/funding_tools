@@ -2,7 +2,7 @@ import { Context } from 'telegraf';
 import { MasterService } from './master.service';
 
 export class MasterController {
-    private service = new MasterService();
+    private service = MasterService.getInstance();
 
     async handleFullSync(ctx: Context) {
         if (this.service.getIsProcessing()) {

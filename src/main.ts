@@ -13,7 +13,7 @@ import apiRouter from './modules/apiReference/api-reference.controller';
 };
 
 // 2. Инициализация
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
+export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
     handlerTimeout: 900_000 // 10 минут (нужно для полной синхронизации БД)
 });
 const masterController = new MasterController();
