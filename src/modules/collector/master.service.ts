@@ -5,6 +5,7 @@ import { LighterService } from '../lighter/lighter.service';
 import { ExtendedService } from '../extended/extended.service';
 
 export class MasterService {
+    private static instance: MasterService;
     private binance = new BinanceService();
     private hl = new HyperliquidService();
     private paradex = new ParadexService();
@@ -12,6 +13,15 @@ export class MasterService {
     private extended = new ExtendedService();
 
     private isProcessing = false;
+
+    private constructor() { }
+
+    public static getInstance(): MasterService {
+        if (!MasterService.instance) {
+            MasterService.instance = new MasterService();
+        }
+        return MasterService.instance;
+    }
 
     async syncAllExchanges() {
         if (this.isProcessing) {

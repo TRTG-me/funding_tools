@@ -1,11 +1,12 @@
 import { Router, Request, Response } from 'express';
+import axios from 'axios';
 import { CalcFundingsService } from '../calcFundings/calc-fundings.service';
 import { MasterService } from '../collector/master.service';
 import { AddCoinsService } from '../addCoinsDB/add-coins.service';
 
 const router = Router();
 const calcService = new CalcFundingsService();
-const masterService = new MasterService();
+const masterService = MasterService.getInstance();
 const addCoinsService = new AddCoinsService();
 
 /**
@@ -95,14 +96,12 @@ router.post('/sync/full', async (req: Request, res: Response) => {
             return res.status(409).json({ success: false, error: 'Sync already in progress' });
         }
 
-        // Запускаем асинхронно, возвращаем статус 202
-        masterService.syncAllExchanges()
-            .then(result => console.log('API Full Sync Completed', result))
-            .catch(err => console.error('API Full Sync Failed', err));
-
-        res.status(202).json({ success: true, message: 'Full sync started' });
+        const result = await masterService.syncAllExchanges();
+        res.json({ success: true, message: 'Full sync completed', ...result });
     } catch (error: any) {
-        res.status(500).json({ success: false, error: error.message });
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: error.message });
+        }
     }
 });
 
@@ -115,11 +114,8 @@ router.post('/sync/coins', async (req: Request, res: Response) => {
             return res.status(409).json({ success: false, error: 'Coin sync already in progress' });
         }
 
-        addCoinsService.syncAllPairs()
-            .then(result => console.log('API Coin Sync Completed', result))
-            .catch(err => console.error('API Coin Sync Failed', err));
-
-        res.status(202).json({ success: true, message: 'Coin sync started' });
+        const result = await addCoinsService.syncAllPairs();
+        res.json({ success: true, message: 'Coin sync completed', ...result });
     } catch (error: any) {
         res.status(500).json({ success: false, error: error.message });
     }
