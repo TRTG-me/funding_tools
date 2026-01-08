@@ -347,7 +347,7 @@ export class CalcFundingsService {
         }));
 
         // 3. Расчет APR в памяти
-        const referenceEndTime = this.getStandardReferenceTime();
+        const standardReferenceEndTime = this.getStandardReferenceTime();
         const periods = [
             { label: '8h', totalHours: 8 },
             { label: '1d', totalHours: 24 },
@@ -393,8 +393,21 @@ export class CalcFundingsService {
                 const diffsArr: number[] = [];
                 let hasNaN = false;
 
+                // --- ПОВЫШЕНИЕ ТОЧНОСТИ (Синхронизация с Binance) ---
+                let coinRefTime = standardReferenceEndTime;
+                if (ex1 === 'Binance' || ex2 === 'Binance') {
+                    const binRecords = fundingCache.get('Binance')?.get(coin) || [];
+                    if (binRecords.length > 0) {
+                        const latestBinTs = Math.max(...binRecords.map(r => Number(r.date)));
+                        const d = new Date(latestBinTs);
+                        d.setMinutes(5, 0, 0); // Синхронизируем с логикой getBinanceReferenceTime
+                        d.setSeconds(0, 0);
+                        coinRefTime = d.getTime();
+                    }
+                }
+
                 for (const p of periods) {
-                    const pEndTs = referenceEndTime; // Упрощаем для скана: используем общее время
+                    const pEndTs = coinRefTime;
                     const pStartTs = pEndTs - (p.totalHours * 60 * 60 * 1000 - 30 * 60 * 1000);
 
                     const apr1 = calculateAPRInMemory(ex1, coin, pStartTs, pEndTs, p.totalHours);
