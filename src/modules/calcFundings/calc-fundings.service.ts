@@ -274,22 +274,43 @@ export class CalcFundingsService {
 
     async getExchangeCoinList(exchange: string): Promise<string[]> {
         let coins: any[] = [];
-        if (exchange === 'Binance') coins = await prisma.binanceCoin.findMany();
-        else if (exchange === 'Hyperliquid') coins = await prisma.hyperliquidCoin.findMany();
-        else if (exchange === 'Paradex') coins = await prisma.paradexCoin.findMany();
-        else if (exchange === 'Lighter') coins = await prisma.lighterCoin.findMany();
-        else if (exchange === 'Extended') coins = await prisma.extendedCoin.findMany();
+        if (exchange === 'Binance') coins = await prisma.binanceCoin.findMany({ select: { coin: true } });
+        else if (exchange === 'Hyperliquid') coins = await prisma.hyperliquidCoin.findMany({ select: { coin: true } });
+        else if (exchange === 'Paradex') coins = await prisma.paradexCoin.findMany({ select: { coin: true } });
+        else if (exchange === 'Lighter') coins = await prisma.lighterCoin.findMany({ select: { coin: true } });
+        else if (exchange === 'Extended') coins = await prisma.extendedCoin.findMany({ select: { coin: true } });
 
         return coins.map(c => this.normalizeCoin(c.coin, exchange.toLowerCase()));
     }
 
-    async findBestOpportunities(selected?: string[]) {
-        const fullList = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
+    // --- PRESETS ---
+
+    async getPresets(): Promise<any[]> {
+        return prisma.fundingPreset.findMany({ orderBy: { id: 'asc' } });
+    }
+
+    async getPresetById(id: number): Promise<any | null> {
+        return prisma.fundingPreset.findUnique({ where: { id } });
+    }
+
+    async updatePreset(id: number, data: { h8: number, d1: number, d3: number, d7: number, d14: number }): Promise<void> {
+        await prisma.fundingPreset.update({
+            where: { id },
+            data
+        });
+    }
+
+    // --- SCANNER ---
+
+    async findBestOpportunities(selectedExchanges?: string[], thresholdsOverride?: any): Promise<any[]> {
         const results: any[] = [];
+        const activeThresh = thresholdsOverride || SCAN_MIN_THRESHOLDS;
+        const fullList = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
+        // const results: any[] = []; // This line is a duplicate and should be removed or commented out if it was intended to be there. Assuming it's a copy-paste error from the instruction.
 
         // 1. Определение пар для сравнения
         let pairsToCompare: [string, string][] = [];
-        const active = (selected && selected.length > 0) ? selected : fullList;
+        const active = (selectedExchanges && selectedExchanges.length > 0) ? selectedExchanges : fullList;
 
         if (active.length === 1) {
             const target = active[0];
@@ -341,8 +362,9 @@ export class CalcFundingsService {
             else if (ex === 'Extended') allRecords = await prisma.extendedFunding.findMany(query);
 
             for (const r of allRecords) {
-                if (!coinMap.has(r.coin)) coinMap.set(r.coin, []);
-                coinMap.get(r.coin)!.push(r);
+                const unified = this.normalizeCoin(r.coin, ex.toLowerCase());
+                if (!coinMap.has(unified)) coinMap.set(unified, []);
+                coinMap.get(unified)!.push(r);
             }
         }));
 
@@ -378,7 +400,8 @@ export class CalcFundingsService {
 
         const checkThresholds = (values: number[]) => {
             return values.every((v, idx) => {
-                const threshold = Object.values(SCAN_MIN_THRESHOLDS)[idx];
+                const keys = ['h8', 'd1', 'd3', 'd7', 'd14'];
+                const threshold = activeThresh[keys[idx]];
                 return v >= threshold;
             });
         };
@@ -442,7 +465,7 @@ export class CalcFundingsService {
             }
         }
 
-        return results.sort((a, b) => b.sortVal - a.sortVal).slice(0, 30);
+        return results.sort((a, b) => b.sortVal - a.sortVal).slice(0, 100);
     }
 
     async getAllCoins(): Promise<string[]> {

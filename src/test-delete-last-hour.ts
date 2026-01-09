@@ -2,12 +2,6 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-/**
- * НАСТРОЙКА: Выбери биржу для очистки
- * 'binance' | 'hyperliquid' | 'paradex'
- */
-const TARGET_EXCHANGE: string = 'lighter'; // <-- МЕНЯЙ ЗДЕСЬ
-
 const tableMap: Record<string, { table: string, label: string }> = {
     binance: { table: 'binanceFunding', label: 'Binance' },
     hyperliquid: { table: 'hyperliquidFunding', label: 'Hyperliquid' },
@@ -17,41 +11,43 @@ const tableMap: Record<string, { table: string, label: string }> = {
 };
 
 async function main() {
-    const config = tableMap[TARGET_EXCHANGE.toLowerCase()];
+    console.log('🚀 --- ЗАПУСК ПОЛНОЙ ОЧИСТКИ (Последние 8 часов для всех бирж) ---');
 
-    if (!config) {
-        console.error(`❌ Ошибка: Биржа "${TARGET_EXCHANGE}" не поддерживается.`);
-        console.log('Доступные варианты: binance, hyperliquid, paradex');
-        return;
-    }
+    for (const key of Object.keys(tableMap)) {
+        const config = tableMap[key];
+        try {
+            // 1. Находим самое позднее время для конкретной биржи
+            const lastRecord = await (prisma[config.table as any] as any).findFirst({
+                orderBy: { date: 'desc' }
+            });
 
-    console.log(`--- ОЧИСТКА ПОСЛЕДНЕГО ЧАСА: ${config.label} ---`);
-
-    // 1. Находим самое позднее время
-    const lastRecord = await (prisma[config.table as any] as any).findFirst({
-        orderBy: { date: 'desc' }
-    });
-
-    if (!lastRecord) {
-        console.log(`❌ В базе нет записей для ${config.label}.`);
-        return;
-    }
-
-    const lastDate = Number(lastRecord.date);
-    const oneHourAgo = lastDate - (60 * 60 * 1000 * 8);
-
-    // 2. Удаляем записи за последний час
-    const deleted = await (prisma[config.table as any] as any).deleteMany({
-        where: {
-            date: {
-                gt: BigInt(oneHourAgo)
+            if (!lastRecord) {
+                console.log(`⚠️  ${config.label}: Записей в базе не обнаружено. Пропускаю.`);
+                continue;
             }
-        }
-    });
 
-    console.log(`✅ ${config.label}: Удалено записей: ${deleted.count}`);
-    console.log(`🧹 Последняя метка была: ${new Date(lastDate).toISOString()}`);
-    console.log(`🧹 Теперь последняя метка будет около: ${new Date(oneHourAgo).toISOString()}`);
+            const lastDate = Number(lastRecord.date);
+            const eightHoursAgo = lastDate - (60 * 60 * 1000 * 8);
+
+            // 2. Удаляем записи за последние 8 часов
+            const deleted = await (prisma[config.table as any] as any).deleteMany({
+                where: {
+                    date: {
+                        gt: BigInt(eightHoursAgo)
+                    }
+                }
+            });
+
+            console.log(`✅ ${config.label}:`);
+            console.log(`   - Удалено записей: ${deleted.count}`);
+            console.log(`   - Последняя метка была: ${new Date(lastDate).toISOString()}`);
+            console.log(`   - Теперь база начинается с: ~${new Date(eightHoursAgo).toISOString()}`);
+        } catch (err: any) {
+            console.error(`❌ Ошибка при очистке ${config.label}: ${err.message}`);
+        }
+    }
+
+    console.log('\n✨ --- ОЧИСТКА ВСЕХ БИРЖ ЗАВЕРШЕНА ---');
 }
 
 main()

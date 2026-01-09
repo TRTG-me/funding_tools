@@ -101,11 +101,15 @@ export class HyperliquidService {
                         break;
                     } catch (error: any) {
                         attempts++;
-                        if (error?.response?.status === 429 && attempts < 2) {
+                        const status = error?.response?.status;
+                        if (status === 429 && attempts < 2) {
                             console.log(`⚠️ [Hyperliquid] Rate limit at ${coinEntry.coin}. Waiting 15s retry...`);
                             await new Promise(r => setTimeout(r, 15000));
+                        } else if (status === 502 && attempts < 2) {
+                            console.log(`⚠️ [Hyperliquid] Bad Gateway (502) at ${coinEntry.coin}. Waiting 30s retry...`);
+                            await new Promise(r => setTimeout(r, 30000));
                         } else {
-                            console.error(`[Hyperliquid] Error for ${coinEntry.coin}: ${error.message}`);
+                            console.error(`[Hyperliquid] Error for ${coinEntry.coin}: ${error.message}${status ? ' (Status: ' + status + ')' : ''}`);
                             break;
                         }
                     }
@@ -114,7 +118,7 @@ export class HyperliquidService {
 
             // УМНАЯ ПАУЗА (Оптимизирована до 800мс / 1.5с)
             const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-            const sleepMs = maxGapForChunk < THREE_DAYS_MS ? 800 : 1500;
+            const sleepMs = maxGapForChunk < THREE_DAYS_MS ? 1000 : 1500;
 
             await new Promise(resolve => setTimeout(resolve, sleepMs));
         }

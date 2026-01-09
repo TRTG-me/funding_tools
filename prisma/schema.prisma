@@ -124,3 +124,15 @@ model ExtendedFunding {
   @@unique([coin, date])
   @@map("extended_fundings")
 }
+
+model FundingPreset {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  h8    Float
+  d1    Float
+  d3    Float
+  d7    Float
+  d14   Float
+
+  @@map("funding_presets")
+}

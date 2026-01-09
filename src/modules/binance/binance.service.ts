@@ -49,7 +49,7 @@ export class BinanceService {
             if (r.coin && r._max.date) lastRecordMap.set(r.coin, Number(r._max.date));
         });
 
-        const CHUNK_SIZE = 50;
+        const CHUNK_SIZE = 10;
         for (let i = 0; i < coins.length; i += CHUNK_SIZE) {
             const chunk = coins.slice(i, i + CHUNK_SIZE);
             const coinsToFetch = [];
@@ -91,7 +91,7 @@ export class BinanceService {
                 }
             }));
 
-            await new Promise(resolve => setTimeout(resolve, 200));
+            await new Promise(resolve => setTimeout(resolve, 600));
         }
 
         const duration = ((Date.now() - startTimeProcessing) / 1000).toFixed(1);

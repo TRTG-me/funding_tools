@@ -8,7 +8,8 @@ interface TimestampedState<T> {
 }
 
 const userStates = new Map<number, TimestampedState<{ coin: string, selected: string[] }>>();
-const scanStates = new Map<number, TimestampedState<{ selected: string[] }>>();
+const scanStates = new Map<number, TimestampedState<{ selected: string[], mode: 'all' | 'manual' }>>();
+const settingsStates = new Map<number, TimestampedState<{ candidateText?: string, editingPresetId?: number }>>();
 
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 минут
 
@@ -51,11 +52,11 @@ function getUserState(userId: number): { coin: string, selected: string[] } | un
     return entry.data;
 }
 
-function setScanState(userId: number, data: { selected: string[] }) {
+function setScanState(userId: number, data: { selected: string[], mode: 'all' | 'manual' }) {
     scanStates.set(userId, { data, timestamp: Date.now() });
 }
 
-function getScanState(userId: number): { selected: string[] } | undefined {
+function getScanState(userId: number): { selected: string[], mode: 'all' | 'manual' } | undefined {
     const entry = scanStates.get(userId);
     if (!entry) return undefined;
 
@@ -68,20 +69,98 @@ function getScanState(userId: number): { selected: string[] } | undefined {
     return entry.data;
 }
 
+function clearAllStates(userId: number) {
+    userStates.delete(userId);
+    scanStates.delete(userId);
+    settingsStates.delete(userId);
+}
+
 export class CalcFundingsController {
     private service = new CalcFundingsService();
 
     async startFlow(ctx: Context) {
+        const userId = ctx.from!.id;
+        clearAllStates(userId);
         await ctx.reply('🔍 Введите название монеты (например, BTC, ETH или PEPE):');
-        setUserState(ctx.from!.id, { coin: '', selected: [] });
+        setUserState(userId, { coin: '', selected: [] });
+    }
+
+    async showBestOpportunities(ctx: Context) {
+        const userId = ctx.from!.id;
+        clearAllStates(userId);
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('🌐 Все биржи', 'scan_mode_all')],
+            [Markup.button.callback('⚙️ Ручной выбор', 'scan_mode_manual')]
+        ]);
+
+        await ctx.reply('Выберите режим сканирования:', keyboard);
+    }
+
+    // --- SETTINGS ---
+
+    async showFundingSettings(ctx: Context) {
+        const userId = ctx.from!.id;
+        clearAllStates(userId);
+        const presets = await this.service.getPresets();
+
+        let text = '⚙️ *НАСТРОЙКИ ПОРОГОВ (APR %)*\n\n';
+        text += '```text\n';
+        text += `| P | 8h | 1d | 3d | 7d | 14d |\n`;
+        text += `|---|----|----|----|----|-----|\n`;
+        for (const p of presets) {
+            const num = p.name.substring(7);
+            text += `| ${num} | ${p.h8.toString().padStart(2)} | ${p.d1.toString().padStart(2)} | ${p.d3.toString().padStart(2)} | ${p.d7.toString().padStart(2)} | ${p.d14.toString().padStart(3)} |\n`;
+        }
+        text += '```\n';
+        text += '💡 *Как изменить?*\n';
+        text += '1. Нажмите кнопку нужного пресета ниже.\n';
+        text += '2. Или отправьте всю таблицу текстом и нажмите Сохранить.';
+
+        const pButtons = presets.map(p => Markup.button.callback(p.name.substring(7), `settings_edit_${p.id}`));
+
+        const keyboard = Markup.inlineKeyboard([
+            pButtons,
+            [Markup.button.callback('✅ Сохранить таблицу', 'settings_save')],
+            [Markup.button.callback('❌ Закрыть', 'settings_close')]
+        ]);
+
+        await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+        settingsStates.set(userId, { data: {}, timestamp: Date.now() });
     }
 
     async handleText(ctx: Context): Promise<boolean> {
         if (!ctx.from || !ctx.message || !('text' in ctx.message)) return false;
 
         const userId = ctx.from.id;
-        const state = getUserState(userId);
+        const text = ctx.message.text.trim();
+        const ss = settingsStates.get(userId);
 
+        // 1. Режим редактирования конкретно одного пресета
+        if (ss && ss.data.editingPresetId) {
+            const vals = text.split(/[,\s]+/).map(v => parseFloat(v));
+            if (vals.length === 5 && vals.every(v => !isNaN(v))) {
+                await this.service.updatePreset(ss.data.editingPresetId, {
+                    h8: vals[0], d1: vals[1], d3: vals[2], d7: vals[3], d14: vals[4]
+                });
+                await ctx.reply(`✅ Пресет ${ss.data.editingPresetId} обновлен!`);
+                clearAllStates(userId); // Глубокая очистка после завершения
+                await this.showFundingSettings(ctx); // Показываем обновленную таблицу
+                return true;
+            } else {
+                await ctx.reply('❌ Некорректный формат. Нужно 5 чисел через запятую или пробел.\nПример: 30, 30, 25, 25, 20');
+                return true;
+            }
+        }
+
+        // 2. Массовое редактирование через таблицу
+        if (text.includes('| P |') && text.includes('| 8h |')) {
+            settingsStates.set(userId, { data: { candidateText: text }, timestamp: Date.now() });
+            await ctx.reply('📥 Данные всей таблицы получены. Нажмите "Сохранить таблицу" выше для применения.');
+            return true;
+        }
+
+        const state = getUserState(userId);
         if (!state || state.coin !== '') return false;
 
         const coin = ctx.message.text.trim().toUpperCase();
@@ -110,28 +189,39 @@ export class CalcFundingsController {
 
     private isScanning = false;
 
-    async showBestOpportunities(ctx: Context) {
-        const userId = ctx.from!.id;
-        scanStates.delete(userId); // Очистка старого состояния
+    private async showPresetSelection(ctx: Context, mode: 'all' | 'manual') {
+        const presets = await this.service.getPresets();
 
-        const keyboard = Markup.inlineKeyboard([
-            [Markup.button.callback('🌐 Все биржи', 'scan_all')],
-            [Markup.button.callback('⚙️ Ручной выбор', 'scan_manual')]
-        ]);
+        let text = `🎯 *ВЫБОР ФИЛЬТРА (${mode === 'all' ? 'Все биржи' : 'Ручной выбор'})*\n\n`;
+        text += '```text\n';
+        text += `| P | 8h | 1d | 3d | 7d | 14d |\n`;
+        text += `|---|----|----|----|----|-----|\n`;
+        for (const p of presets) {
+            const num = p.name.substring(7);
+            text += `| ${num} | ${p.h8.toString().padStart(2)} | ${p.d1.toString().padStart(2)} | ${p.d3.toString().padStart(2)} | ${p.d7.toString().padStart(2)} | ${p.d14.toString().padStart(3)} |\n`;
+        }
+        text += '```\n';
+        text += 'Выберите кнопку соответствующего пресета:';
 
-        await ctx.reply('Выберите режим сканирования:', keyboard);
+        const buttons = presets.map(p => Markup.button.callback(p.name.substring(7), `scan_preset_${p.id}_${mode}`));
+        const keyboard = Markup.inlineKeyboard([buttons]);
+
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
     }
 
-    private async runScan(ctx: Context, selectedExchanges?: string[]) {
+    private async runScan(ctx: Context, presetId: number, selectedExchanges?: string[]) {
         if (this.isScanning) {
             return ctx.reply('⚠️ Сканер уже запущен. Пожалуйста, подождите завершения предыдущего поиска.');
         }
 
         try {
             this.isScanning = true;
-            await ctx.reply('⏳ Запускаю сканер лучших возможностей...\nЭто может занять 15-30 секунд.');
+            const preset = await this.service.getPresetById(presetId);
+            if (!preset) throw new Error('Preset not found');
 
-            const best = await this.service.findBestOpportunities(selectedExchanges);
+            await ctx.reply(`⏳ Запускаю сканер лучших возможностей...\nПресет: *${preset.name}*\nЭто может занять 15-30 секунд.`, { parse_mode: 'Markdown' });
+
+            const best = await this.service.findBestOpportunities(selectedExchanges, preset);
 
             if (best.length === 0) {
                 return ctx.reply('📭 На данный момент монет, подходящих под критерии фильтра, не найдено.');
@@ -147,7 +237,7 @@ export class CalcFundingsController {
             table += `│${'COIN (P)'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│\n`;
             table += `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
 
-            for (const item of best) {
+            for (const item of best.slice(0, 30)) {
                 const label = `${item.coin.substring(0, 6)} (${item.pair})`;
                 const row = `│${label.substring(0, c0).padEnd(c0)}│${item.diffs.map((v: number) => v.toFixed(0).padStart(cW)).join('│')}│\n`;
                 table += row;
@@ -253,13 +343,13 @@ export class CalcFundingsController {
         const data = ctx.callbackQuery.data;
 
         // --- Обработка сканера ТОП-20 ---
-        if (data === 'scan_all') {
-            await this.runScan(ctx);
+        if (data === 'scan_mode_all') {
+            await this.showPresetSelection(ctx, 'all');
             return await ctx.answerCbQuery();
         }
 
-        if (data === 'scan_manual') {
-            setScanState(userId, { selected: [] });
+        if (data === 'scan_mode_manual') {
+            setScanState(userId, { selected: [], mode: 'manual' });
             await ctx.editMessageText('Выберите биржи (от 1 до 5) и нажмите ОК:', this.getScanKeyboard([]));
             return await ctx.answerCbQuery();
         }
@@ -267,37 +357,105 @@ export class CalcFundingsController {
         if (data.startsWith('scan_toggle_')) {
             const ex = data.replace('scan_toggle_', '');
             const stateScan = getScanState(userId);
-            if (!stateScan) return await ctx.answerCbQuery();
+            if (!stateScan) return await ctx.answerCbQuery('⚠️ Сессия сканирования истекла. Нажмите "Лучшие монеты" снова.', { show_alert: true });
 
             if (!stateScan.selected.includes(ex)) {
                 stateScan.selected.push(ex);
             }
 
-            if (stateScan.selected.length === 5) {
-                await ctx.editMessageText(`✅ Выбраны все биржи. Запускаю расчет...`);
-                await this.runScan(ctx, stateScan.selected);
-                scanStates.delete(userId);
+            const list = stateScan.selected.join(', ');
+            await ctx.editMessageText(`Выбрано: ${list}\nДобавьте еще или нажмите ОК:`, this.getScanKeyboard(stateScan.selected));
+            return await ctx.answerCbQuery();
+        }
+
+        if (data.startsWith('scan_preset_')) {
+            const parts = data.split('_');
+            const presetId = parseInt(parts[2]);
+            const mode = parts[3];
+
+            if (mode === 'all') {
+                await this.runScan(ctx, presetId);
             } else {
-                const list = stateScan.selected.join(', ');
-                await ctx.editMessageText(`Выбрано: ${list}\nДобавьте еще или нажмите ОК:`, this.getScanKeyboard(stateScan.selected));
+                const stateScan = getScanState(userId);
+                if (stateScan) {
+                    await this.runScan(ctx, presetId, stateScan.selected);
+                } else {
+                    return await ctx.answerCbQuery('⚠️ Сессия истекла. Начните выбор заново.', { show_alert: true });
+                }
             }
             return await ctx.answerCbQuery();
         }
 
         if (data === 'scan_confirm') {
             const stateScan = getScanState(userId);
-            if (!stateScan || stateScan.selected.length === 0) {
+            if (!stateScan) return await ctx.answerCbQuery('⚠️ Сессия истекла. Нажмите "Лучшие монеты" снова.', { show_alert: true });
+
+            if (stateScan.selected.length === 0) {
                 return ctx.answerCbQuery('⚠️ Выберите хотя бы одну биржу!');
             }
-            await ctx.editMessageText(`✅ Запускаю расчет для: ${stateScan.selected.join(', ')}`);
-            await this.runScan(ctx, stateScan.selected);
-            scanStates.delete(userId);
+            await this.showPresetSelection(ctx, 'manual');
+            return await ctx.answerCbQuery();
+        }
+
+        if (data === 'settings_close') {
+            await ctx.deleteMessage().catch(() => { });
+            settingsStates.delete(userId);
+            return await ctx.answerCbQuery();
+        }
+
+        if (data.startsWith('settings_edit_')) {
+            const id = parseInt(data.replace('settings_edit_', ''));
+            const p = await this.service.getPresetById(id);
+            if (!p) return await ctx.answerCbQuery();
+
+            settingsStates.set(userId, { data: { editingPresetId: id }, timestamp: Date.now() });
+            await ctx.reply(`✏️ Редактируем *${p.name}*\nТекущие: ${p.h8}, ${p.d1}, ${p.d3}, ${p.d7}, ${p.d14}\n\nВведите 5 новых значений через запятую:`, { parse_mode: 'Markdown' });
+            return await ctx.answerCbQuery();
+        }
+
+        if (data === 'settings_save') {
+            const ss = settingsStates.get(userId);
+            if (!ss || !ss.data.candidateText) {
+                return ctx.answerCbQuery('⚠️ Сначала отправьте отредактированную таблицу текстом!');
+            }
+
+            try {
+                const lines = ss.data.candidateText.split('\n').filter(l => l.includes('| Preset ') || (l.startsWith('| Preset') && l.includes('| 8h |')) === false && l.includes('|'));
+                // Пропускаем заголовок и разделитель
+                const dataLines = lines.filter(l => l.toLowerCase().includes('preset') && !l.includes('8h'));
+
+                const dbPresets = await this.service.getPresets();
+
+                for (const line of dataLines) {
+                    const cells = line.split('|').map(c => c.trim()).filter(c => c.length > 0);
+                    if (cells.length < 6) continue;
+
+                    const name = cells[0];
+                    const h8 = parseFloat(cells[1]);
+                    const d1 = parseFloat(cells[2]);
+                    const d3 = parseFloat(cells[3]);
+                    const d7 = parseFloat(cells[4]);
+                    const d14 = parseFloat(cells[5]);
+
+                    const existing = dbPresets.find(p => p.name.toLowerCase() === name.toLowerCase());
+                    if (existing) {
+                        await this.service.updatePreset(existing.id, { h8, d1, d3, d7, d14 });
+                    }
+                }
+
+                await ctx.editMessageText('✅ Настройки успешно сохранены в базе данных!');
+                settingsStates.delete(userId);
+            } catch (e: any) {
+                await ctx.reply('❌ Ошибка парсинга таблицы: ' + e.message);
+            }
             return await ctx.answerCbQuery();
         }
 
         // --- Обработка одиночного расчета монеты ---
-        const state = getUserState(userId);
-        if (!state) return await ctx.answerCbQuery();
+        if (data.startsWith('coin_sel_') || data === 'coin_ok') {
+            const state = getUserState(userId);
+            if (!state) return await ctx.answerCbQuery('⚠️ Сессия анализа истекла. Напишите монету снова.', { show_alert: true });
+        }
 
         if (data.startsWith('coin_sel_')) {
             const ex = data.replace('coin_sel_', '');
@@ -390,7 +548,8 @@ export class CalcFundingsController {
             return await ctx.answerCbQuery();
 
         } else if (data.startsWith('calc_ex1_')) {
-            // Старая логика (для совместимости, если остались сообщения в чате)
+            const state = getUserState(userId);
+            if (!state) return await ctx.answerCbQuery('⚠️ Сессия истекла.', { show_alert: true });
             const ex1 = data.replace('calc_ex1_', '');
             state.selected = [ex1];
             const allExchanges = await this.service.getExchangesForCoin(state.coin);
@@ -406,6 +565,8 @@ export class CalcFundingsController {
             });
             return await ctx.answerCbQuery();
         } else if (data.startsWith('calc_ex2_')) {
+            const state = getUserState(userId);
+            if (!state) return await ctx.answerCbQuery('⚠️ Сессия истекла.', { show_alert: true });
             const ex2 = data.replace('calc_ex2_', '');
             const ex1 = state.selected[0];
             const table = await this.renderComparisonTable(state.coin, ex1, ex2);
