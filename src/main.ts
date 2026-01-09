@@ -7,6 +7,11 @@ import { CalcFundingsController } from './modules/calcFundings/calc-fundings.con
 import express from 'express';
 import apiRouter from './modules/apiReference/api-reference.controller';
 
+import cron from 'node-cron';
+import { MasterService } from './modules/collector/master.service';
+
+const masterService = MasterService.getInstance();
+
 // 1. Фикс для BigInt
 (BigInt.prototype as any).toJSON = function () {
     return this.toString();
@@ -22,7 +27,7 @@ const calcFundingsController = new CalcFundingsController();
 
 // Простейший Rate Limite (1 запрос в 10 сек для сканера)
 const lastScanTime = new Map<number, number>();
-const SCAN_COOLDOWN = 10_000;
+const SCAN_COOLDOWN = 3_000;
 
 // 3. Авторизация (Middleware)
 // ... (уже есть)
@@ -49,6 +54,7 @@ bot.use(async (ctx, next) => {
 const mainKeyboard = Markup.keyboard([
     ['📊 Фандинг монеты', '💎 Лучшие монеты'],
     ['💎 Обновить список монет', '🚀 Обновить Базу Данных'],
+    ['⚙️ Настройки фандинга']
 ]).resize();
 
 // 5. Обработчики
@@ -106,6 +112,15 @@ bot.hears('💎 Лучшие монеты', async (ctx) => {
     }
 });
 
+bot.hears('⚙️ Настройки фандинга', async (ctx) => {
+    try {
+        await calcFundingsController.showFundingSettings(ctx);
+    } catch (err: any) {
+        console.error('Settings Error:', err);
+        await ctx.reply('❌ Ошибка открытия настроек.');
+    }
+});
+
 // Общий обработчик текста для ввода названия монеты
 bot.on('text', async (ctx, next) => {
     const handled = await calcFundingsController.handleText(ctx).catch(err => {
@@ -123,11 +138,47 @@ bot.on('callback_query', (ctx) => {
 // 6. API Server (Express)
 const app = express();
 app.use(express.json());
+
 app.use('/api', apiRouter);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3005;
 app.listen(PORT, () => {
     console.log(`📡 API Server is running on port ${PORT}`);
+});
+
+// --- СЕКЦИЯ АВТО-ОБНОВЛЕНИЯ (CRON) ---
+
+async function performAutoUpdate() {
+    console.log(`\n[${new Date().toISOString()}] 🕒 Запуск автоматического обновления...`);
+
+    // 1. Проверка монет
+    try {
+        console.log(`[Scheduled] 1/2: Обновление списка торговых пар...`);
+        await addCoinsService.syncAllPairs();
+        console.log(`[Scheduled] ✅ Список монет обновлен.`);
+    } catch (e: any) {
+        console.error(`[Scheduled] ❌ Ошибка обновления монет:`, e.message);
+    }
+
+    // Пауза 30 секунд между фазами, чтобы разгрузить IP
+    await new Promise(r => setTimeout(r, 30000));
+
+    // 2. Обновление фандингов
+    try {
+        console.log(`[Scheduled] 2/2: Запуск синхронизации фандинга (5 бирж)...`);
+        const result = await masterService.syncAllExchanges();
+        console.log(`[Scheduled] ✅ Синхронизация завершена за ${result.totalDuration}с.`);
+    } catch (e: any) {
+        console.error(`[Scheduled] ❌ Ошибка синхронизации фандинга:`, e.message);
+    }
+}
+
+// Запуск при старте (временно отключено для избежания 403 при частых перезагрузках)
+// performAutoUpdate().catch(e => console.error('Startup Update Failed:', e));
+
+// Крон на 2-ю минуту каждого часа (*:02)
+cron.schedule('2 * * * *', () => {
+    performAutoUpdate().catch(e => console.error('Cron Update Failed:', e));
 });
 
 // 7. Запуск бота
@@ -135,7 +186,7 @@ bot.launch()
     .then(() => console.log('🚀 Бот запущен (Full Sync)'))
     .catch((err) => console.error('💥 Launch Error:', err.message));
 
-// Функция для синхронизации монет
+// Функция для синхронизации монет (ручная через кнопку)
 async function runCoinSync(ctx?: any) {
     try {
         const result = await addCoinsService.syncAllPairs();
@@ -144,16 +195,8 @@ async function runCoinSync(ctx?: any) {
         if (ctx) {
             await ctx.reply(msg, { parse_mode: 'Markdown' });
         } else {
-            const users = await prisma.user.findMany();
-            for (const user of users) {
-                try {
-                    await bot.telegram.sendMessage(user.telegramId.toString(), msg, { parse_mode: 'Markdown' });
-                } catch (e: any) {
-                    console.error(`Failed to send sync msg to ${user.telegramId}:`, e.message);
-                }
-            }
+            console.log(`✅ [AutoSync] Обновлено: ${result.totalMatched} пар.`);
         }
-        console.log(`✅ [AutoSync] Обновлено: ${result.totalMatched} пар.`);
     } catch (error: any) {
         console.log('❌ [AutoSync] Critical Error:', error.message);
         if (ctx) {

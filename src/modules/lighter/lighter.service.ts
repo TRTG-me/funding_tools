@@ -55,33 +55,44 @@ export class LighterService {
             const chunk = coins.slice(i, i + CHUNK_SIZE);
 
             await Promise.all(chunk.map(async (coinEntry) => {
-                try {
-                    const baseSymbol = this.normalizeSymbol(coinEntry.coin);
-                    const lastDateMs = lastRecordMap.get(baseSymbol);
-                    let startTimestamp = lastDateMs ? Math.floor(lastDateMs / 1000) + 3600 : defaultStart;
+                let attempts = 0;
+                while (attempts < 2) {
+                    try {
+                        const baseSymbol = this.normalizeSymbol(coinEntry.coin);
+                        const lastDateMs = lastRecordMap.get(baseSymbol);
+                        let startTimestamp = lastDateMs ? Math.floor(lastDateMs / 1000) + 3600 : defaultStart;
 
-                    if (startTimestamp >= endTimestamp) return;
+                        if (startTimestamp >= endTimestamp) break;
 
-                    const countBack = !lastDateMs ? 336 : Math.max(1, Math.ceil((endTimestamp - startTimestamp) / 3600));
+                        const countBack = !lastDateMs ? 336 : Math.max(1, Math.ceil((endTimestamp - startTimestamp) / 3600));
 
-                    const { data } = await axios.get<LighterApiResponse>(this.apiUrl, {
-                        params: { market_id: coinEntry.marketId, resolution: '1h', start_timestamp: startTimestamp, end_timestamp: endTimestamp, count_back: countBack }
-                    });
+                        const { data } = await axios.get<LighterApiResponse>(this.apiUrl, {
+                            params: { market_id: coinEntry.marketId, resolution: '1h', start_timestamp: startTimestamp, end_timestamp: endTimestamp, count_back: countBack }
+                        });
 
-                    if (data.fundings?.length > 0) {
-                        const newFundings = data.fundings.filter(item => (item.timestamp * 1000) > (lastDateMs || 0));
-                        if (newFundings.length > 0) {
-                            const records = newFundings.map(item => ({
-                                coin: baseSymbol,
-                                fundingRate: ((parseFloat(item.rate) / 100) * (item.direction === 'short' ? -1 : 1)).toFixed(12),
-                                date: BigInt(item.timestamp * 1000)
-                            }));
-                            await prisma.lighterFunding.createMany({ data: records, skipDuplicates: true });
-                            totalSaved += records.length;
+                        if (data.fundings?.length > 0) {
+                            const newFundings = data.fundings.filter(item => (item.timestamp * 1000) > (lastDateMs || 0));
+                            if (newFundings.length > 0) {
+                                const records = newFundings.map(item => ({
+                                    coin: baseSymbol,
+                                    fundingRate: ((parseFloat(item.rate) / 100) * (item.direction === 'short' ? -1 : 1)).toFixed(12),
+                                    date: BigInt(item.timestamp * 1000)
+                                }));
+                                await prisma.lighterFunding.createMany({ data: records, skipDuplicates: true });
+                                totalSaved += records.length;
+                            }
+                        }
+                        break; // Успешно выходим из цикла попыток
+                    } catch (error: any) {
+                        attempts++;
+                        if (error?.response?.status === 429 && attempts < 2) {
+                            console.log(`⚠️ [Lighter] Rate limit at ${coinEntry.coin}. Waiting 20s retry...`);
+                            await new Promise(r => setTimeout(r, 20000));
+                        } else {
+                            console.error(`[Lighter] Error for ${coinEntry.coin}: ${error.message}`);
+                            break;
                         }
                     }
-                } catch (error: any) {
-                    console.error(`[Lighter] Error for ${coinEntry.coin}: ${error.message}`);
                 }
             }));
             await new Promise(resolve => setTimeout(resolve, 500));
