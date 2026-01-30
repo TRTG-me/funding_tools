@@ -1,19 +1,10 @@
 import { prisma } from '../database/prisma.service';
-import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
-import { ChartConfiguration } from 'chart.js';
 
 // Пороги фильтрации для сканера "Лучшие монеты" (APR %)
 const SCAN_MIN_THRESHOLDS = { h8: 30, d1: 30, d3: 25, d7: 25, d14: 20 };
 
 export class CalcFundingsService {
-    private chartJSNodeCanvas: ChartJSNodeCanvas;
-
     constructor() {
-        this.chartJSNodeCanvas = new ChartJSNodeCanvas({
-            width: 1000,
-            height: 500,
-            backgroundColour: 'white'
-        });
     }
 
     async getHourlyHistory(exchange: string, coin: string, startTs: number, endTs: number): Promise<{ date: number, rate: number }[]> {
@@ -62,90 +53,6 @@ export class CalcFundingsService {
             }
         }
         return result;
-    }
-
-    async generateMultiChart(coin: string, datasetsInfo: { label: string, history: any[] }[]): Promise<Buffer> {
-        const colorMap: Record<string, string> = {
-            'Binance': 'rgb(33, 150, 243)',     // Blue
-            'Hyperliquid': 'rgb(244, 67, 54)', // Red
-            'Paradex': 'rgb(76, 175, 80)',     // Green
-            'Lighter': 'rgb(156, 39, 176)',     // Purple
-            'Extended': 'rgb(255, 152, 0)'      // Orange
-        };
-
-        // Собираем все точки времени
-        const allTimes = Array.from(new Set(datasetsInfo.flatMap(d => d.history.map(h => h.date)))).sort((a, b) => a - b);
-
-        if (allTimes.length === 0) {
-            // Если данных нет, создаем "пустой" график с надписью
-            return await this.chartJSNodeCanvas.renderToBuffer({
-                type: 'line',
-                data: { labels: ['No Data'], datasets: [] },
-                options: { plugins: { title: { display: true, text: `No historical data for ${coin}` } } }
-            });
-        }
-
-        const labels = allTimes.map(t => {
-            const d = new Date(t);
-            return `${d.getDate()}.${d.getMonth() + 1} ${d.getHours()}:00`;
-        });
-
-        const chartDatasets = datasetsInfo.map(ds => {
-            const historyMap = new Map(ds.history.map(h => [h.date, h.rate]));
-            return {
-                label: ds.label,
-                data: allTimes.map(t => {
-                    const val = historyMap.get(t);
-                    return val !== undefined ? parseFloat(val.toFixed(1)) : null;
-                }),
-                borderColor: colorMap[ds.label] || '#000',
-                backgroundColor: (colorMap[ds.label] || '#000').replace('rgb', 'rgba').replace(')', ', 0.1)'),
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.4,
-                spanGaps: true
-            };
-        });
-
-        const configuration: ChartConfiguration = {
-            type: 'line',
-            data: {
-                labels,
-                datasets: chartDatasets as any[]
-            },
-            options: {
-                responsive: false,
-                plugins: {
-                    title: {
-                        display: true,
-                        text: `${coin} Funding APR % (14 days)`,
-                        font: { size: 20 }
-                    },
-                    legend: { position: 'bottom' }
-                },
-                scales: {
-                    x: {
-                        ticks: {
-                            maxTicksLimit: 14,
-                            callback: function (val, index) {
-                                const label = this.getLabelForValue(index as number);
-                                return label.split(' ')[0];
-                            }
-                        }
-                    },
-                    y: {
-                        grid: {
-
-                        },
-                        ticks: {
-                            callback: (value) => value + '%'
-                        }
-                    }
-                }
-            }
-        };
-
-        return await this.chartJSNodeCanvas.renderToBuffer(configuration);
     }
 
     private normalizeCoin(name: string, exchange: string): string {

@@ -534,16 +534,6 @@ export class CalcFundingsController {
                 }
             }
 
-            // В конце выводим ОДИН общий график
-            if (historyData.length > 0) {
-                try {
-                    const buffer = await this.service.generateMultiChart(state.coin, historyData);
-                    await ctx.replyWithPhoto({ source: buffer });
-                } catch (err) {
-                    console.error(`Error generating multi-chart:`, err);
-                }
-            }
-
             userStates.delete(userId);
             return await ctx.answerCbQuery();
 
